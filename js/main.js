@@ -7,23 +7,35 @@
                 loadPath: "locales/{{lng}}/{{ns}}.json",
                 parse: (data) => JSON.parse(data)
             },
+            whitelist: ["zh-CN", "zh-TW", "ko-KR", "en-US"],
+            load: "currentOnly",
+            //debug: true,
             fallbackLng: "zh-CN"
         }, function (err, t) {
             jqueryI18next.init(i18next, $);
             $("[data-i18n]").localize();
             document.title = $.t("title");
             setup_page();
+
+            $("#language").change(function () {
+                i18next.changeLanguage($("#language").val(), function (err, t) {
+                    location.reload();
+                });
+            });
         });
+
+    i18next.on('languageChanged', function (lng) {
+        $("#language").val(lng);
+    });
 });
 
+var setup_done = false;
 function setup_page() {
-    var setup_done = false;
-
     var map_tbl_sort = new Tablesort(document.getElementById("map_table"));
     var team_tbl_sort = new Tablesort(document.getElementById("team_table"));
 
     var mission_info, spot_info, enemy_team_info, enemy_in_team_info;
-    var enemy_character_type_info, campaign_info;
+    var enemy_character_type_info, campaign_info, gun_info, ally_team_info;
     $.when(
         $.getJSON("jsons/mission_info.json", function (data) {
             mission_info = data;
@@ -42,8 +54,16 @@ function setup_page() {
         }),
         $.getJSON("jsons/campaign_info.json", function (data) {
             campaign_info = data;
+        }),
+        $.getJSON("jsons/gun_info.json", function (data) {
+            gun_info = data;
+        }),
+        $.getJSON("jsons/ally_team_info.json", function (data) {
+            ally_team_info = data;
         })
     ).then(function () {
+        map.init(mission_info, spot_info, enemy_team_info, enemy_character_type_info, gun_info, ally_team_info);
+
         $.each(campaign_info, function (id, campaign) {
             var type_text;
             switch (campaign.type) {
@@ -75,7 +95,7 @@ function setup_page() {
 
         $("#campaign_select").change(function () {
             $("#map_select").empty();
-            var campaign_id = Number($("#campaign_select option:checked").val());
+            var campaign_id = Number($("#campaign_select").val());
             localStorage.setItem("campaign_select", campaign_id);
             $.each(campaign_info[campaign_id].mission_ids, function (index, mission_id) {
                 var mission = mission_info[mission_id];
@@ -90,7 +110,7 @@ function setup_page() {
 
         $("#map_select").change(function () {
             $("#map_table tbody").empty();
-            var mission_id = Number($("#map_select option:checked").val());
+            var mission_id = Number($("#map_select").val());
             localStorage.setItem("map_select", mission_id);
             $.each(mission_info[mission_id].enemy_team_count, function (enemy_team_id, enemy_team_count) {
                 var enemy_team = enemy_team_info[enemy_team_id];
@@ -110,22 +130,13 @@ function setup_page() {
                 
 
                 $("<tr>").append(
-                    $("<td>").text(enemy_team_id).attr("data-team_id", ""),
+                    $("<td>").text(enemy_team_id).attr("data-team_id", enemy_team_id),
                     $("<td>").text($.t(enemy_character_type_info[enemy_team.enemy_leader].name)),
                     $("<td>").text(enemy_team.difficulty),
                     $("<td>").text(members),
                     $("<td>").text(enemy_team_count),
                     $("<td>").text(drops)
                 ).appendTo("#map_table");
-
-                if ($("#auto_generate_map_btn").hasClass("active")) {
-                    generateMap(mission_info, spot_info, enemy_team_info, enemy_character_type_info);
-                } else {
-                    var canvas = document.getElementById("mission_map");
-                    canvas.width = 0;
-                    canvas.height = 0;
-                }
-
             });
             map_tbl_sort.refresh();
 
@@ -133,9 +144,17 @@ function setup_page() {
                 $(".table-success").removeClass("table-success");
                 $(this).addClass("table-success");
                 var enemy_team_id = $("[data-team_id]", this).html();
-                $("#team_select").val(enemy_team_id);
-                $("#team_select").change();
+                if ($("#team_select").val() != enemy_team_id) {
+                    //map.selectAllEnemy(enemy_team_id); currently has a racing bug
+                    $("#team_select").val(enemy_team_id).change();
+                }
             });
+
+            if ($("#auto_generate_map_btn").hasClass("active")) {
+                map.generate();
+            } else {
+                map.remove();
+            }
 
             if (setup_done)
                 $("#map_table tbody tr").first().click();
@@ -143,7 +162,7 @@ function setup_page() {
 
         $("#team_select").change(function () {
             $("#team_table tbody").empty();
-            var team_id = Number($("#team_select option:checked").val());
+            var team_id = Number($("#team_select").val());
             localStorage.setItem("team_select", team_id);
             $.each(enemy_team_info[team_id].member_ids, function (index, member_id) {
                 var member = enemy_in_team_info[member_id];
@@ -161,14 +180,15 @@ function setup_page() {
                     $("<td>").text(character.armor_piercing),
                     $("<td>").text(character.armor),
                     $("<td>").text(member.coordinator_x),
-                    $("<td>").text(member.coordinator_y)
+                    $("<td>").text(member.coordinator_y),
+                    $("<td>").text($.t(character.character).replace(new RegExp("//c", "g"), " "))
                 ).appendTo("#team_table");
             });
             team_tbl_sort.refresh();
         });
 
         $("#generate_map_btn").click(function () {
-            generateMap(mission_info, spot_info, enemy_team_info, enemy_character_type_info);
+            map.generate();
         });
 
         $("#auto_generate_map_btn").click(function () {
@@ -180,9 +200,11 @@ function setup_page() {
         });
 
         $("#download_map_btn").click(function () {
-            document.getElementById("mission_map").toBlob(function (blob) {
-                window.open(URL.createObjectURL(blob));
-            }, "image/png");
+            map.download();
+        });
+
+        $("#download_full_map_btn").click(function () {
+            map.downloadFullMap();
         });
 
         var storage_val = localStorage.getItem("auto_generate_map") === "true";
@@ -190,183 +212,30 @@ function setup_page() {
             $("#auto_generate_map_btn").addClass("active");
         }
 
-        storage_val = Number(localStorage.getItem("campaign_select")) || 1;
-        $("#campaign_select").val(storage_val);
-        $("#campaign_select").change();
+        storage_val = Number(loadStorageItem("campaign_select", 1));
+        $("#campaign_select").val(storage_val).change();
 
-        storage_val = Number(localStorage.getItem("map_select")) || 5;
-        $("#map_select").val(storage_val);
+        storage_val = Number(loadStorageItem("map_select", 5));
+        if ($("#map_select option[value=" + storage_val + "]").length > 0)
+            $("#map_select").val(storage_val);
         $("#map_select").change();
 
-        storage_val = Number(localStorage.getItem("team_select")) || 1;
-        $("#team_select").val(storage_val);
-        $("#team_select").change();
+        storage_val = Number(loadStorageItem("team_select", 1));
+        var tmp = $("#map_table tbody td[data-team_id=" + storage_val + "]");
+        if (tmp.length > 0) {
+            tmp.parent().click();
+        } else {
+            $("#map_table tbody tr").first().click();
+        }
 
-        var setup_done = true;
+        setup_done = true;
     });
 }
 
-function generateMap(mission_info, spot_info, enemy_team_info, enemy_character_type_info) {
-    var mission_id = Number($("#map_select option:checked").val());
-    var mission = mission_info[mission_id];
-
-    var canvas = document.getElementById("mission_map");
-    canvas.width = Math.abs(mission.map_eff_width);
-    canvas.height = Math.abs(mission.map_eff_height);
-    var ctx = canvas.getContext('2d');
-    if (canvas.getContext) {
-        var bgImg = new Image();
-        bgImg.onload = function () {
-            if (mission.special_type == 1)
-                ctx.fillStyle = "#3B639F";
-            else
-                ctx.fillStyle = "white";
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.globalCompositeOperation = "multiply";
-
-            drawBgImageHeler(ctx, this, mission, 0, 0, -1, -1);
-            drawBgImageHeler(ctx, this, mission, 1, 0, 1, -1);
-            drawBgImageHeler(ctx, this, mission, 2, 0, -1, -1);
-            drawBgImageHeler(ctx, this, mission, 0, 1, -1, 1);
-            drawBgImageHeler(ctx, this, mission, 1, 1, 1, 1);
-            drawBgImageHeler(ctx, this, mission, 2, 1, -1, 1);
-            drawBgImageHeler(ctx, this, mission, 0, 2, -1, -1);
-            drawBgImageHeler(ctx, this, mission, 1, 2, 1, -1);
-            drawBgImageHeler(ctx, this, mission, 2, 2, -1, -1);
-
-            ctx.globalCompositeOperation = "source-over";
-
-            $.each(mission.spot_ids, function (index, spot_id) {
-                var spot = spot_info[spot_id];
-                $.each(spot.route_types, function (other_id, number_of_ways) {
-                    drawLine(ctx, spot.coordinator_x, spot.coordinator_y, spot_info[other_id].coordinator_x, spot_info[other_id].coordinator_y, number_of_ways);
-                });
-            });
-
-            ctx.font = "bold 48px sans-serif";
-            ctx.textAlign = "center";
-
-            $.each(mission.spot_ids, function (index, spot_id) {
-                var spot = spot_info[spot_id];
-
-                var imagename = spot.belong + ".png";
-                if (spot.if_random) {
-                    imagename = "random" + imagename;
-                } else if (spot.special_eft) {
-                    imagename = "radar" + imagename;
-                } else if (spot.active_cycle) {
-                    imagename = "closedap" + imagename;
-                } else {
-                    imagename = spot.type + imagename;
-                }
-                imagename = "images/spot_" + imagename;
-                var spotImg = new Image();
-                spotImg.onload = function () {
-                    var w = this.naturalWidth;
-                    var h = this.naturalHeight;
-                    ctx.drawImage(this, spot.coordinator_x - w / 2, spot.coordinator_y - h / 2, w, h);
-                    if (spot.enemy_team_id) {
-                        var enemy_team = enemy_team_info[spot.enemy_team_id];
-                        drawText(ctx, $.t(enemy_character_type_info[enemy_team.enemy_leader].name), spot.coordinator_x, spot.coordinator_y - 12);
-                        drawText(ctx, enemy_team.difficulty, spot.coordinator_x, spot.coordinator_y + 36);
-                    }
-                }
-                spotImg.src = imagename;
-            });
-        };
-        bgImg.src = "images/" + mission.map_res_name + ".png";
-    }
-
-    $("#mission_map").width("100%");
-}
-
-function drawBgImageHeler(ctx, bgImg, mission, x_src, y_src, x_scale, y_scale) {
-    var w_all = mission.map_all_width;
-    var h_all = mission.map_all_height;
-    var w_chop = mission.map_eff_width;
-    var h_chop = mission.map_eff_height;
-    var x_off = mission.map_offset_x;
-    var y_off = mission.map_offset_y;
-
-    if (w_chop < 0) {
-        w_chop = -w_chop;
-        y_scale = -y_scale;
-    }
-    if (h_chop < 0) {
-        h_chop = -h_chop;
-        x_scale = -x_scale;
-    }
-
-    x_src = w_all * x_src;
-    y_src = h_all * y_src;
-    // w_src = w_all, h_src = h_all
-    var x_dest = w_all * 3 / 2 + x_off - w_chop / 2;
-    var y_dest = h_all * 3 / 2 - y_off - h_chop / 2;
-    // w_dest = w_chop, h_dest = h_chop
-    var x_inter = Math.max(x_dest, x_src);
-    var y_inter = Math.max(y_dest, y_src);
-    var w_inter = Math.min(x_dest + w_chop, x_src + w_all) - x_inter;
-    var h_inter = Math.min(y_dest + h_chop, y_src + h_all) - y_inter;
-
-    if (w_inter > 0 && h_inter > 0) {
-        ctx.save();
-        ctx.scale(x_scale, y_scale);
-
-        var x_src_true = (x_inter % w_all);
-        if (x_scale < 0) x_src_true = w_all - x_src_true - w_inter;
-        x_src_true = x_src_true / w_all * bgImg.naturalWidth;
-
-        var y_src_true = (y_inter % h_all);
-        if (y_scale < 0) y_src_true = h_all - y_src_true - h_inter;
-        y_src_true = y_src_true / h_all * bgImg.naturalHeight;
-
-        var w_src_true = w_inter / w_all * bgImg.naturalWidth;
-        var h_src_true = h_inter / h_all * bgImg.naturalHeight;
-
-        var x_dest_true = (x_inter - x_dest) * x_scale;
-        var y_dest_true = (y_inter - y_dest) * y_scale;
-        var w_dest_true = w_inter * x_scale;
-        var h_dest_true = h_inter * y_scale;
-
-        ctx.drawImage(bgImg, x_src_true, y_src_true, w_src_true, h_src_true, x_dest_true, y_dest_true, w_dest_true, h_dest_true);
-        ctx.restore();
-    }
-}
-
-function drawText(ctx, text, x, y) {
-    ctx.shadowColor = "black";
-    ctx.shadowBlur = 7;
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = "black";
-    ctx.strokeText(text, x, y);
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "white";
-    ctx.fillText(text, x, y);
-}
-
-function drawLine(ctx, x0, y0, x1, y1, number_of_ways) {
-    ctx.shadowColor = "black";
-    ctx.shadowBlur = 11;
-    ctx.strokeStyle = "white";
-    ctx.lineWidth = 25
-    ctx.setLineDash([75, 45]);
-    ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x1, y1);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    if (number_of_ways == 1) {
-        var dx = x1 - x0;
-        var dy = y1 - y0;
-        var thickFactor = 50 / Math.sqrt(dx * dx + dy * dy);
-        var lenFactor = 0.15;
-        ctx.lineWidth = 1
-        ctx.fillStyle = "green";
-        ctx.beginPath();
-        ctx.moveTo(x0 + dx * (0.5 - lenFactor) + dy * thickFactor, y0 + dy * (0.5 - lenFactor) - dx * thickFactor);
-        ctx.lineTo(x0 + dx * (0.5 + lenFactor), y0 + dy * (0.5 + lenFactor));
-        ctx.lineTo(x0 + dx * (0.5 - lenFactor) - dy * thickFactor, y0 + dy * (0.5 - lenFactor) + dx * thickFactor);
-        ctx.fill();
-    }
-    ctx.setLineDash([]);
+function loadStorageItem(itemName, defaultValue) {
+    var storage_val = localStorage.getItem(itemName);
+    if (storage_val == null)
+        return defaultValue;
+    else
+        return storage_val;
 }
